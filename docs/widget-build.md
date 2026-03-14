@@ -22,7 +22,7 @@ This repo ships WidgetKit source files under `mac-widget/` and an Xcode project 
 
 ### CLI Build (no Xcode UI)
 ```
-cd /Users/R/Work/openusage/mac-widget
+cd /Users/R/Work/codex/mac-widget
 xcodebuild -project OpenUsageWidget.xcodeproj -scheme OpenUsageWidgetApp -configuration Debug build
 ```
 If code signing fails, set `DEVELOPMENT_TEAM` in `project.yml`, run `xcodegen`, and retry.
