@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tauri_plugin_log::{Target, TargetKind};
 use uuid::Uuid;
@@ -63,6 +63,31 @@ pub struct ProbeResult {
 #[serde(rename_all = "camelCase")]
 pub struct ProbeBatchComplete {
     pub batch_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccount {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "authType")]
+    pub auth_type: String,
+    #[serde(rename = "authRef")]
+    pub auth_ref: Option<String>,
+    pub meta: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    pub accounts: Vec<ProviderAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvidersConfig {
+    pub version: u32,
+    pub providers: HashMap<String, ProviderConfig>,
 }
 
 #[tauri::command]
@@ -252,6 +277,163 @@ fn list_plugins(state: tauri::State<'_, Mutex<AppState>>) -> Vec<PluginMeta> {
         .collect()
 }
 
+fn providers_config_path(app_data_dir: &PathBuf) -> PathBuf {
+    app_data_dir.join("providers.json")
+}
+
+fn default_providers_config() -> ProvidersConfig {
+    ProvidersConfig {
+        version: 1,
+        providers: HashMap::new(),
+    }
+}
+
+#[tauri::command]
+fn load_provider_accounts(state: tauri::State<'_, Mutex<AppState>>) -> Result<ProvidersConfig, String> {
+    let app_data_dir = {
+        let locked = state.lock().map_err(|e| e.to_string())?;
+        locked.app_data_dir.clone()
+    };
+    let path = providers_config_path(&app_data_dir);
+    if !path.exists() {
+        return Ok(default_providers_config());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let parsed: ProvidersConfig = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    Ok(parsed)
+}
+
+#[tauri::command]
+fn save_provider_accounts(
+    state: tauri::State<'_, Mutex<AppState>>,
+    config: ProvidersConfig,
+) -> Result<(), String> {
+    let app_data_dir = {
+        let locked = state.lock().map_err(|e| e.to_string())?;
+        locked.app_data_dir.clone()
+    };
+    let path = providers_config_path(&app_data_dir);
+    let payload = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, payload).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn ensure_keychain_supported() -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        Ok(())
+    } else {
+        Err("keychain API is only supported on macOS".to_string())
+    }
+}
+
+fn find_keychain_account(service: &str) -> Option<String> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", service])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(start) = line.find("\"acct\"<blob>=\"") {
+            let rest = &line[start + 14..];
+            if let Some(end) = rest.find('"') {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+fn read_keychain(service: String) -> Result<String, String> {
+    ensure_keychain_supported()?;
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", &service, "-w"])
+        .output()
+        .map_err(|e| format!("keychain read failed: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("keychain item not found: {}", first_line));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[tauri::command]
+fn write_keychain(service: String, value: String) -> Result<(), String> {
+    ensure_keychain_supported()?;
+    let account = find_keychain_account(&service);
+    let output = if let Some(acct) = account {
+        std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                &service,
+                "-a",
+                &acct,
+                "-w",
+                &value,
+                "-U",
+            ])
+            .output()
+    } else {
+        std::process::Command::new("security")
+            .args(["add-generic-password", "-s", &service, "-w", &value, "-U"])
+            .output()
+    }
+    .map_err(|e| format!("keychain write failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("keychain write failed: {}", first_line));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_keychain(service: String) -> Result<(), String> {
+    ensure_keychain_supported()?;
+    let output = std::process::Command::new("security")
+        .args(["delete-generic-password", "-s", &service])
+        .output()
+        .map_err(|e| format!("keychain delete failed: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("keychain delete failed: {}", first_line));
+    }
+    Ok(())
+}
+
+const APP_GROUP_ID: &str = "group.ai.openusage.local";
+
+#[tauri::command]
+fn write_widget_data(
+    state: tauri::State<'_, Mutex<AppState>>,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let app_data_dir = {
+        let locked = state.lock().map_err(|e| e.to_string())?;
+        locked.app_data_dir.clone()
+    };
+    let data = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+
+    if cfg!(target_os = "macos") {
+        let home = dirs::home_dir().ok_or("no home dir")?;
+        let group_dir = home.join("Library").join("Group Containers").join(APP_GROUP_ID);
+        std::fs::create_dir_all(&group_dir).map_err(|e| e.to_string())?;
+        let widget_path = group_dir.join("usage.json");
+        std::fs::write(widget_path, &data).map_err(|e| e.to_string())?;
+    }
+
+    let fallback_path = app_data_dir.join("usage.json");
+    std::fs::write(fallback_path, data).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -282,7 +464,13 @@ pub fn run() {
             hide_panel,
             start_probe_batch,
             list_plugins,
-            get_log_path
+            get_log_path,
+            load_provider_accounts,
+            save_provider_accounts,
+            read_keychain,
+            write_keychain,
+            delete_keychain,
+            write_widget_data
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

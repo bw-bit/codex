@@ -6,6 +6,42 @@
   const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
   const SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers"
   const REFRESH_BUFFER_MS = 5 * 60 * 1000 // refresh 5 minutes before expiration
+  const PROVIDERS_CONFIG = "providers.json"
+
+  function getProvidersConfigPath(ctx) {
+    return ctx.app.appDataDir + "/" + PROVIDERS_CONFIG
+  }
+
+  function normalizeAccount(raw, index) {
+    if (!raw || typeof raw !== "object") return null
+    var id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "account-" + (index + 1)
+    var label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : "Account " + (index + 1)
+    var authType = typeof raw.authType === "string" ? raw.authType : null
+    var authRef = typeof raw.authRef === "string" && raw.authRef.trim() ? raw.authRef.trim() : null
+    var meta = raw.meta && typeof raw.meta === "object" ? raw.meta : null
+    if (!authType) return null
+    return { id: id, label: label, authType: authType, authRef: authRef, meta: meta }
+  }
+
+  function loadAccounts(ctx) {
+    var path = getProvidersConfigPath(ctx)
+    if (!ctx.host.fs.exists(path)) return []
+    try {
+      var text = ctx.host.fs.readText(path)
+      var json = ctx.util.tryParseJson(text)
+      var accounts = json && json.providers && json.providers.claude && json.providers.claude.accounts
+      if (!Array.isArray(accounts)) return []
+      var out = []
+      for (var i = 0; i < accounts.length; i++) {
+        var normalized = normalizeAccount(accounts[i], i)
+        if (normalized) out.push(normalized)
+      }
+      return out
+    } catch (e) {
+      ctx.host.log.warn("providers config read failed: " + String(e))
+      return []
+    }
+  }
 
   function utf8DecodeBytes(bytes) {
     // Prefer native TextDecoder when available (QuickJS may not expose it).
@@ -131,7 +167,7 @@
           const oauth = parsed.claudeAiOauth
           if (oauth && oauth.accessToken) {
             ctx.host.log.info("credentials loaded from file")
-            return { oauth, source: "file", fullData: parsed }
+            return { oauth, storage: { type: "file", path: CRED_FILE }, fullData: parsed }
           }
         }
         ctx.host.log.warn("credentials file exists but no valid oauth data")
@@ -141,15 +177,23 @@
     }
 
     // Try keychain fallback
+    const keychainCreds = loadCredentialsFromKeychain(ctx, KEYCHAIN_SERVICE)
+    if (keychainCreds) return keychainCreds
+
+    ctx.host.log.warn("no credentials found")
+    return null
+  }
+
+  function loadCredentialsFromKeychain(ctx, service) {
     try {
-      const keychainValue = ctx.host.keychain.readGenericPassword(KEYCHAIN_SERVICE)
+      const keychainValue = ctx.host.keychain.readGenericPassword(service)
       if (keychainValue) {
         const parsed = tryParseCredentialJSON(ctx, keychainValue)
         if (parsed) {
           const oauth = parsed.claudeAiOauth
           if (oauth && oauth.accessToken) {
             ctx.host.log.info("credentials loaded from keychain")
-            return { oauth, source: "keychain", fullData: parsed }
+            return { oauth, storage: { type: "keychain", service: service }, fullData: parsed }
           }
         }
         ctx.host.log.warn("keychain has data but no valid oauth")
@@ -157,24 +201,22 @@
     } catch (e) {
       ctx.host.log.info("keychain read failed (may not exist): " + String(e))
     }
-
-    ctx.host.log.warn("no credentials found")
     return null
   }
 
-  function saveCredentials(ctx, source, fullData) {
+  function saveCredentials(ctx, storage, fullData) {
     // MUST use minified JSON - macOS `security -w` hex-encodes values with newlines,
     // which Claude Code can't read back, causing it to invalidate the session.
     const text = JSON.stringify(fullData)
-    if (source === "file") {
+    if (storage && storage.type === "file") {
       try {
         ctx.host.fs.writeText(CRED_FILE, text)
       } catch (e) {
         ctx.host.log.error("Failed to write Claude credentials file: " + String(e))
       }
-    } else if (source === "keychain") {
+    } else if (storage && storage.type === "keychain" && storage.service) {
       try {
-        ctx.host.keychain.writeGenericPassword(KEYCHAIN_SERVICE, text)
+        ctx.host.keychain.writeGenericPassword(storage.service, text)
       } catch (e) {
         ctx.host.log.error("Failed to write Claude credentials keychain: " + String(e))
       }
@@ -190,7 +232,7 @@
   }
 
   function refreshToken(ctx, creds) {
-    const { oauth, source, fullData } = creds
+    const { oauth, storage, fullData } = creds
     if (!oauth.refreshToken) {
       ctx.host.log.warn("refresh skipped: no refresh token")
       return null
@@ -246,7 +288,7 @@
 
       // Persist updated credentials
       fullData.claudeAiOauth = oauth
-      saveCredentials(ctx, source, fullData)
+      saveCredentials(ctx, storage, fullData)
 
       ctx.host.log.info("refresh succeeded, new token expires in " + (body.expires_in || "unknown") + "s")
       return newAccessToken
@@ -272,8 +314,26 @@
     })
   }
 
-  function probe(ctx) {
-    const creds = loadCredentials(ctx)
+  function errorLine(ctx, message) {
+    return ctx.line.badge({ label: "Error", text: message })
+  }
+
+  function probeAccount(ctx, account) {
+    var creds = null
+    if (account && account.authType === "json") {
+      if (!account.authRef) {
+        throw "Missing keychain secret for account."
+      }
+      creds = loadCredentialsFromKeychain(ctx, account.authRef)
+      if (!creds || !creds.oauth || !creds.oauth.accessToken || !creds.oauth.accessToken.trim()) {
+        throw "Keychain credentials missing."
+      }
+    } else if (account && account.authType && account.authType !== "auto") {
+      throw "Unsupported auth type for Claude."
+    } else {
+      creds = loadCredentials(ctx)
+    }
+
     if (!creds || !creds.oauth || !creds.oauth.accessToken || !creds.oauth.accessToken.trim()) {
       ctx.host.log.error("probe failed: not logged in")
       throw "Not logged in. Run `claude` to authenticate."
@@ -398,6 +458,36 @@
     }
 
     return { plan: plan, lines: lines }
+  }
+
+  function probe(ctx) {
+    var accounts = loadAccounts(ctx)
+    if (!accounts || accounts.length === 0) {
+      return probeAccount(ctx, null)
+    }
+
+    var sections = []
+    for (var i = 0; i < accounts.length; i++) {
+      var account = accounts[i]
+      try {
+        var result = probeAccount(ctx, account)
+        sections.push({
+          id: account.id,
+          label: account.label,
+          plan: result.plan,
+          lines: result.lines,
+        })
+      } catch (e) {
+        var msg = typeof e === "string" ? e : "Probe failed"
+        sections.push({
+          id: account.id,
+          label: account.label,
+          lines: [errorLine(ctx, msg)],
+        })
+      }
+    }
+
+    return { lines: [], sections: sections }
   }
 
   globalThis.__openusage_plugin = { id: "claude", probe }

@@ -28,6 +28,7 @@ export function OverviewPage({ plugins, onRetryPlugin, displayMode }: OverviewPa
           loading={plugin.loading}
           error={plugin.error}
           lines={plugin.data?.lines ?? []}
+          sections={plugin.data?.sections ?? []}
           skeletonLines={plugin.meta.lines}
           lastManualRefreshAt={plugin.lastManualRefreshAt}
           onRetry={onRetryPlugin ? () => onRetryPlugin(plugin.meta.id) : undefined}

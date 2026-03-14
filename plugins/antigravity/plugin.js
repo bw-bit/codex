@@ -184,13 +184,30 @@
       return a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0
     })
 
+    var claudeLines = []
+    var geminiLines = []
     for (var i = 0; i < models.length; i++) {
-      lines.push(modelLine(ctx, models[i].label, models[i].remainingFraction, models[i].resetTime))
+      var entry = models[i]
+      var line = modelLine(ctx, entry.label, entry.remainingFraction, entry.resetTime)
+      var lower = String(entry.label || "").toLowerCase()
+      if (lower.indexOf("claude") !== -1) {
+        claudeLines.push(line)
+      } else {
+        geminiLines.push(line)
+      }
     }
 
-    if (lines.length === 0) throw "No usage data available."
+    var sections = []
+    if (claudeLines.length > 0) {
+      sections.push({ id: "group-1", label: "Group 1 (Claude)", lines: claudeLines })
+    }
+    if (geminiLines.length > 0) {
+      sections.push({ id: "group-2", label: "Group 2 (Gemini)", lines: geminiLines })
+    }
 
-    return { plan: plan, lines: lines }
+    if (sections.length === 0) throw "No usage data available."
+
+    return { plan: plan, lines: [], sections: sections }
   }
 
   globalThis.__openusage_plugin = { id: "antigravity", probe: probe }

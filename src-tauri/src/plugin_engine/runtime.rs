@@ -47,7 +47,18 @@ pub struct PluginOutput {
     pub display_name: String,
     pub plan: Option<String>,
     pub lines: Vec<MetricLine>,
+    pub sections: Option<Vec<PluginSection>>,
     pub icon_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSection {
+    pub id: String,
+    pub label: String,
+    pub plan: Option<String>,
+    pub subtitle: Option<String>,
+    pub lines: Vec<MetricLine>,
 }
 
 pub fn run_probe(
@@ -131,10 +142,47 @@ pub fn run_probe(
 
         let plan: Option<String> = result.get::<_, String>("plan").ok().filter(|s| !s.is_empty());
 
-        let lines = match parse_lines(&result) {
-            Ok(lines) if !lines.is_empty() => lines,
-            Ok(_) => vec![error_line("no lines returned".to_string())],
-            Err(msg) => vec![error_line(msg)],
+        let sections = match parse_sections(&result) {
+            Ok(items) => items,
+            Err(msg) => vec![PluginSection {
+                id: "error".to_string(),
+                label: "Error".to_string(),
+                plan: None,
+                subtitle: None,
+                lines: vec![error_line(msg)],
+            }],
+        };
+
+        let parsed_lines = match parse_lines(&result) {
+            Ok(lines) => lines,
+            Err(msg) => {
+                return PluginOutput {
+                    provider_id: plugin_id,
+                    display_name,
+                    plan,
+                    lines: vec![error_line(msg)],
+                    sections: None,
+                    icon_url,
+                };
+            }
+        };
+
+        let lines = match parsed_lines {
+            Some(lines) if !lines.is_empty() => lines,
+            Some(_) => {
+                if sections.is_empty() {
+                    vec![error_line("no lines returned".to_string())]
+                } else {
+                    vec![]
+                }
+            }
+            None => {
+                if sections.is_empty() {
+                    vec![error_line("missing lines".to_string())]
+                } else {
+                    vec![]
+                }
+            }
         };
 
         PluginOutput {
@@ -142,16 +190,28 @@ pub fn run_probe(
             display_name,
             plan,
             lines,
+            sections: if sections.is_empty() { None } else { Some(sections) },
             icon_url,
         }
     })
 }
 
-fn parse_lines(result: &Object) -> Result<Vec<MetricLine>, String> {
-    let lines: Array = result
-        .get("lines")
-        .map_err(|_| "missing lines".to_string())?;
+fn parse_lines(result: &Object) -> Result<Option<Vec<MetricLine>>, String> {
+    let value: Value = match result.get("lines") {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+    let lines: Array = value
+        .into_array()
+        .ok_or_else(|| "lines must be an array".to_string())?;
+    let parsed = parse_lines_array(lines)?;
+    Ok(Some(parsed))
+}
 
+fn parse_lines_array(lines: Array) -> Result<Vec<MetricLine>, String> {
     let mut out = Vec::new();
     let len = lines.len();
     for idx in 0..len {
@@ -411,12 +471,63 @@ fn parse_lines(result: &Object) -> Result<Vec<MetricLine>, String> {
     Ok(out)
 }
 
+fn parse_sections(result: &Object) -> Result<Vec<PluginSection>, String> {
+    let value: Value = match result.get("sections") {
+        Ok(v) => v,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if value.is_undefined() || value.is_null() {
+        return Ok(Vec::new());
+    }
+    let sections: Array = value
+        .into_array()
+        .ok_or_else(|| "sections must be an array".to_string())?;
+    let mut out = Vec::new();
+    let len = sections.len();
+    for idx in 0..len {
+        let section_obj: Object = sections
+            .get(idx)
+            .map_err(|_| format!("invalid section at index {}", idx))?;
+        let id = section_obj
+            .get::<_, String>("id")
+            .unwrap_or_else(|_| format!("section-{}", idx));
+        let label = section_obj
+            .get::<_, String>("label")
+            .unwrap_or_else(|_| format!("Section {}", idx + 1));
+        let plan = section_obj.get::<_, String>("plan").ok().filter(|s| !s.is_empty());
+        let subtitle = section_obj.get::<_, String>("subtitle").ok().filter(|s| !s.is_empty());
+
+        let lines_value: Value = section_obj
+            .get("lines")
+            .map_err(|_| format!("section {} missing lines", idx))?;
+        let lines = if let Some(lines_array) = lines_value.into_array() {
+            match parse_lines_array(lines_array) {
+                Ok(parsed) if !parsed.is_empty() => parsed,
+                Ok(_) => vec![error_line("no lines returned".to_string())],
+                Err(msg) => vec![error_line(msg)],
+            }
+        } else {
+            vec![error_line("section lines must be an array".to_string())]
+        };
+
+        out.push(PluginSection {
+            id,
+            label,
+            plan,
+            subtitle,
+            lines,
+        });
+    }
+    Ok(out)
+}
+
 fn error_output(plugin: &LoadedPlugin, message: String) -> PluginOutput {
     PluginOutput {
         provider_id: plugin.manifest.id.clone(),
         display_name: plugin.manifest.name.clone(),
         plan: None,
         lines: vec![error_line(message)],
+        sections: None,
         icon_url: plugin.icon_data_url.clone(),
     }
 }

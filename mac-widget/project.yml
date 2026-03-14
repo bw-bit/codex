@@ -1,0 +1,72 @@
+name: OpenUsageWidget
+options:
+  deploymentTarget:
+    macOS: "13.0"
+
+settings:
+  base:
+    PRODUCT_NAME: OpenUsageWidget
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: J7V5F2FWSK
+
+packages: {}
+
+fileGroups:
+  - Shared
+  - OpenUsageWidgetApp
+  - OpenUsageWidgetExtension
+
+schemes:
+  OpenUsageWidgetApp:
+    build:
+      targets:
+        OpenUsageWidgetApp: [run]
+
+    run:
+      config: Debug
+
+    archive:
+      config: Release
+
+  OpenUsageWidgetExtension:
+    build:
+      targets:
+        OpenUsageWidgetExtension: [run]
+
+    run:
+      config: Debug
+
+    archive:
+      config: Release
+
+targets:
+  OpenUsageWidgetApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: OpenUsageWidgetApp
+      - path: Shared
+    info:
+      path: OpenUsageWidgetApp/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.openusage.widgetapp
+        CODE_SIGN_ENTITLEMENTS: OpenUsageWidgetApp/OpenUsageWidgetApp.entitlements
+    dependencies:
+      - target: OpenUsageWidgetExtension
+        embed: true
+
+  OpenUsageWidgetExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: OpenUsageWidgetExtension
+      - path: Shared
+    info:
+      path: OpenUsageWidgetExtension/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.openusage.widgetapp.widget
+        CODE_SIGN_ENTITLEMENTS: OpenUsageWidgetExtension/OpenUsageWidgetExtension.entitlements
+        PRODUCT_NAME: OpenUsageWidgetExtension
+        PRODUCT_MODULE_NAME: OpenUsageWidgetExtension

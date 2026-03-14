@@ -19,6 +19,7 @@ import {
   arePluginSettingsEqual,
   DEFAULT_AUTO_UPDATE_INTERVAL,
   DEFAULT_DISPLAY_MODE,
+  DEFAULT_SHOW_CURSOR_PROVIDER,
   DEFAULT_TRAY_ICON_STYLE,
   DEFAULT_TRAY_SHOW_PERCENTAGE,
   DEFAULT_THEME_MODE,
@@ -27,6 +28,7 @@ import {
   loadAutoUpdateInterval,
   loadDisplayMode,
   loadPluginSettings,
+  loadShowCursorProvider,
   loadTrayShowPercentage,
   loadTrayIconStyle,
   loadThemeMode,
@@ -34,6 +36,7 @@ import {
   saveAutoUpdateInterval,
   saveDisplayMode,
   savePluginSettings,
+  saveShowCursorProvider,
   saveTrayShowPercentage,
   saveTrayIconStyle,
   saveThemeMode,
@@ -43,6 +46,12 @@ import {
   type TrayIconStyle,
   type ThemeMode,
 } from "@/lib/settings"
+import {
+  buildKeychainService,
+  normalizeProvidersConfig,
+  type ProviderAccount,
+  type ProvidersConfig,
+} from "@/lib/provider-accounts"
 
 const PANEL_WIDTH = 400;
 const MAX_HEIGHT_FALLBACK_PX = 600;
@@ -50,6 +59,16 @@ const MAX_HEIGHT_FRACTION_OF_MONITOR = 0.8;
 const ARROW_OVERHEAD_PX = 37; // .tray-arrow (7px) + wrapper pt-1.5 (6px) + bottom p-6 (24px)
 const TRAY_SETTINGS_DEBOUNCE_MS = 2000;
 const TRAY_PROBE_DEBOUNCE_MS = 500;
+
+const CORE_PROVIDER_IDS = new Set(["codex", "claude", "antigravity", "zai", "kimicode"])
+
+function filterPluginsMeta(all: PluginMeta[], showCursor: boolean): PluginMeta[] {
+  return all.filter((plugin) => {
+    if (CORE_PROVIDER_IDS.has(plugin.id)) return true
+    if (showCursor && plugin.id === "cursor") return true
+    return false
+  })
+}
 
 type PluginState = {
   data: PluginOutput | null
@@ -64,6 +83,7 @@ function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [pluginStates, setPluginStates] = useState<Record<string, PluginState>>({})
+  const [allPluginsMeta, setAllPluginsMeta] = useState<PluginMeta[]>([])
   const [pluginsMeta, setPluginsMeta] = useState<PluginMeta[]>([])
   const [pluginSettings, setPluginSettings] = useState<PluginSettings | null>(null)
   const [autoUpdateInterval, setAutoUpdateInterval] = useState<AutoUpdateIntervalMinutes>(
@@ -75,9 +95,11 @@ function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>(DEFAULT_DISPLAY_MODE)
   const [trayIconStyle, setTrayIconStyle] = useState<TrayIconStyle>(DEFAULT_TRAY_ICON_STYLE)
   const [trayShowPercentage, setTrayShowPercentage] = useState(DEFAULT_TRAY_SHOW_PERCENTAGE)
+  const [showCursorProvider, setShowCursorProvider] = useState(DEFAULT_SHOW_CURSOR_PROVIDER)
   const [maxPanelHeightPx, setMaxPanelHeightPx] = useState<number | null>(null)
   const maxPanelHeightPxRef = useRef<number | null>(null)
   const [appVersion, setAppVersion] = useState("...")
+  const [providersConfig, setProvidersConfig] = useState<ProvidersConfig | null>(null)
 
   const { updateStatus, triggerInstall } = useAppUpdate()
   const [showAbout, setShowAbout] = useState(false)
@@ -87,6 +109,7 @@ function App() {
   const trayUpdateTimerRef = useRef<number | null>(null)
   const trayUpdatePendingRef = useRef(false)
   const [trayReady, setTrayReady] = useState(false)
+  const widgetWriteTimerRef = useRef<number | null>(null)
 
   // Store state in refs so scheduleTrayIconUpdate can read current values without recreating the callback
   const pluginsMetaRef = useRef(pluginsMeta)
@@ -390,6 +413,7 @@ function App() {
   }, [activeView, displayPlugins]);
 
   const getErrorMessage = useCallback((output: PluginOutput) => {
+    if (output.sections && output.sections.length > 0) return null
     if (output.lines.length !== 1) return null
     const line = output.lines[0]
     if (line.type === "badge" && line.label === "Error") {
@@ -456,19 +480,60 @@ function App() {
     onBatchComplete: handleBatchComplete,
   })
 
+  const buildWidgetPayload = useCallback(() => {
+    const providers = displayPlugins.map((plugin) => ({
+      id: plugin.meta.id,
+      name: plugin.meta.name,
+      plan: plugin.data?.plan ?? null,
+      lines: plugin.data?.lines ?? [],
+      sections: plugin.data?.sections ?? [],
+      error: plugin.error ?? null,
+    }))
+    return {
+      generatedAt: new Date().toISOString(),
+      displayMode,
+      providers,
+    }
+  }, [displayPlugins, displayMode])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (widgetWriteTimerRef.current !== null) {
+      window.clearTimeout(widgetWriteTimerRef.current)
+      widgetWriteTimerRef.current = null
+    }
+    const payload = buildWidgetPayload()
+    widgetWriteTimerRef.current = window.setTimeout(() => {
+      widgetWriteTimerRef.current = null
+      invoke("write_widget_data", { payload }).catch((error) => {
+        console.error("Failed to write widget data:", error)
+      })
+    }, 500)
+  }, [buildWidgetPayload])
+
   useEffect(() => {
     let isMounted = true
 
     const loadSettings = async () => {
       try {
+        let storedShowCursor = DEFAULT_SHOW_CURSOR_PROVIDER
+        try {
+          storedShowCursor = await loadShowCursorProvider()
+        } catch (error) {
+          console.error("Failed to load show cursor setting:", error)
+        }
+
         const availablePlugins = await invoke<PluginMeta[]>("list_plugins")
         if (!isMounted) return
-        setPluginsMeta(availablePlugins)
+        setAllPluginsMeta(availablePlugins)
+        const filteredPlugins = filterPluginsMeta(availablePlugins, storedShowCursor)
+        setPluginsMeta(filteredPlugins)
+        setShowCursorProvider(storedShowCursor)
 
         const storedSettings = await loadPluginSettings()
         const normalized = normalizePluginSettings(
           storedSettings,
-          availablePlugins
+          filteredPlugins
         )
 
         if (!arePluginSettingsEqual(storedSettings, normalized)) {
@@ -521,6 +586,16 @@ function App() {
           setDisplayMode(storedDisplayMode)
           setTrayIconStyle(storedTrayIconStyle)
           setTrayShowPercentage(normalizedTrayShowPercentage)
+          try {
+            const rawProviders = await invoke<ProvidersConfig>("load_provider_accounts")
+            const normalizedProviders = normalizeProvidersConfig(rawProviders)
+            setProvidersConfig(normalizedProviders)
+            if (JSON.stringify(rawProviders) !== JSON.stringify(normalizedProviders)) {
+              await invoke("save_provider_accounts", { config: normalizedProviders })
+            }
+          } catch (error) {
+            console.error("Failed to load provider accounts:", error)
+          }
           const enabledIds = getEnabledPluginIds(normalized)
           setLoadingForPlugins(enabledIds)
           try {
@@ -552,6 +627,37 @@ function App() {
       isMounted = false
     }
   }, [setLoadingForPlugins, setErrorForPlugins, startBatch])
+
+  useEffect(() => {
+    if (allPluginsMeta.length === 0) return
+    const filtered = filterPluginsMeta(allPluginsMeta, showCursorProvider)
+    setPluginsMeta(filtered)
+    if (!pluginSettings) return
+    const normalized = normalizePluginSettings(pluginSettings, filtered)
+    if (!arePluginSettingsEqual(pluginSettings, normalized)) {
+      setPluginSettings(normalized)
+      void savePluginSettings(normalized).catch((error) => {
+        console.error("Failed to save plugin settings after provider filter:", error)
+      })
+      const previousEnabled = new Set(getEnabledPluginIds(pluginSettings))
+      const nextEnabled = getEnabledPluginIds(normalized)
+      const newlyEnabled = nextEnabled.filter((id) => !previousEnabled.has(id))
+      if (newlyEnabled.length > 0) {
+        setLoadingForPlugins(newlyEnabled)
+        startBatch(newlyEnabled).catch((error) => {
+          console.error("Failed to start probe for newly enabled plugins:", error)
+          setErrorForPlugins(newlyEnabled, "Failed to start probe")
+        })
+      }
+    }
+  }, [
+    allPluginsMeta,
+    pluginSettings,
+    showCursorProvider,
+    setLoadingForPlugins,
+    setErrorForPlugins,
+    startBatch,
+  ])
 
   useEffect(() => {
     if (!pluginSettings) {
@@ -714,6 +820,16 @@ function App() {
       )
   }, [pluginSettings, pluginsMeta])
 
+  const accountsProviders = useMemo(() => {
+    const preferredOrder = ["codex", "claude", "antigravity", "zai", "kimicode"]
+    if (showCursorProvider) preferredOrder.push("cursor")
+    const metaById = new Map(pluginsMeta.map((plugin) => [plugin.id, plugin]))
+    return preferredOrder.map((id) => {
+      const meta = metaById.get(id)
+      return { id, name: meta?.name ?? id }
+    })
+  }, [pluginsMeta, showCursorProvider])
+
   const handleReorder = useCallback(
     (orderedIds: string[]) => {
       if (!pluginSettings) return
@@ -759,6 +875,98 @@ function App() {
       })
     },
     [pluginSettings, setLoadingForPlugins, setErrorForPlugins, startBatch, scheduleTrayIconUpdate]
+  )
+
+  const handleShowCursorChange = useCallback((value: boolean) => {
+    setShowCursorProvider(value)
+    void saveShowCursorProvider(value).catch((error) => {
+      console.error("Failed to save show cursor setting:", error)
+    })
+  }, [])
+
+  const persistProvidersConfig = useCallback(async (next: ProvidersConfig) => {
+    setProvidersConfig(next)
+    await invoke("save_provider_accounts", { config: next })
+  }, [])
+
+  const createAccountId = () => {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+      return crypto.randomUUID()
+    }
+    return `acct-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  }
+
+  const upsertProviderAccount = useCallback(
+    async (providerId: string, account: ProviderAccount, secret?: string | null) => {
+      if (!providersConfig) return
+      const nextProviders = { ...providersConfig.providers }
+      const existing = nextProviders[providerId]?.accounts ?? []
+      const nextAccounts = [...existing]
+
+      const accountId = account.id || createAccountId()
+      const needsSecret = account.authType !== "auto"
+      const authRef = needsSecret ? buildKeychainService(providerId, accountId) : undefined
+      const nextAccount: ProviderAccount = {
+        ...account,
+        id: accountId,
+        authRef,
+      }
+
+      const existingIndex = nextAccounts.findIndex((item) => item.id === accountId)
+      if (existingIndex >= 0) {
+        const prev = nextAccounts[existingIndex]
+        if (prev.authRef && prev.authRef !== authRef) {
+          try {
+            await invoke("delete_keychain", { service: prev.authRef })
+          } catch (error) {
+            console.error("Failed to delete previous keychain secret:", error)
+          }
+        }
+        nextAccounts[existingIndex] = nextAccount
+      } else {
+        nextAccounts.push(nextAccount)
+      }
+
+      if (needsSecret && secret) {
+        await invoke("write_keychain", { service: authRef, value: secret })
+      }
+
+      const nextConfig: ProvidersConfig = {
+        ...providersConfig,
+        providers: {
+          ...nextProviders,
+          [providerId]: { accounts: nextAccounts },
+        },
+      }
+      await persistProvidersConfig(nextConfig)
+    },
+    [providersConfig, persistProvidersConfig]
+  )
+
+  const removeProviderAccount = useCallback(
+    async (providerId: string, accountId: string) => {
+      if (!providersConfig) return
+      const nextProviders = { ...providersConfig.providers }
+      const existing = nextProviders[providerId]?.accounts ?? []
+      const nextAccounts = existing.filter((account) => account.id !== accountId)
+      const removed = existing.find((account) => account.id === accountId)
+      if (removed?.authRef) {
+        try {
+          await invoke("delete_keychain", { service: removed.authRef })
+        } catch (error) {
+          console.error("Failed to delete keychain secret:", error)
+        }
+      }
+      const nextConfig: ProvidersConfig = {
+        ...providersConfig,
+        providers: {
+          ...nextProviders,
+          [providerId]: { accounts: nextAccounts },
+        },
+      }
+      await persistProvidersConfig(nextConfig)
+    },
+    [providersConfig, persistProvidersConfig]
   )
 
   // Detect whether the scroll area has overflow below
@@ -809,6 +1017,12 @@ function App() {
           onTrayIconStyleChange={handleTrayIconStyleChange}
           trayShowPercentage={trayShowPercentage}
           onTrayShowPercentageChange={handleTrayShowPercentageChange}
+          showCursorProvider={showCursorProvider}
+          onShowCursorProviderChange={handleShowCursorChange}
+          providersConfig={providersConfig}
+          providers={accountsProviders}
+          onUpsertAccount={upsertProviderAccount}
+          onRemoveAccount={removeProviderAccount}
           providerIconUrl={navPlugins[0]?.iconUrl}
         />
       )

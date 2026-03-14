@@ -23,6 +23,17 @@ function isProgressLine(line: PluginOutput["lines"][number]): line is ProgressLi
   return line.type === "progress"
 }
 
+function collectRuntimeLines(data: PluginOutput): PluginOutput["lines"] {
+  if (Array.isArray(data.sections) && data.sections.length > 0) {
+    const out: PluginOutput["lines"] = []
+    for (const section of data.sections) {
+      out.push(...section.lines)
+    }
+    return out
+  }
+  return data.lines
+}
+
 export function getTrayPrimaryBars(args: {
   pluginsMeta: PluginMeta[]
   pluginSettings: PluginSettings | null
@@ -50,12 +61,13 @@ export function getTrayPrimaryBars(args: {
 
     let fraction: number | undefined
     if (data) {
+      const runtimeLines = collectRuntimeLines(data)
       // Find first candidate that exists in runtime data
       const primaryLabel = meta.primaryCandidates.find((label) =>
-        data.lines.some((line) => isProgressLine(line) && line.label === label)
+        runtimeLines.some((line) => isProgressLine(line) && line.label === label)
       )
       if (primaryLabel) {
-        const primaryLine = data.lines.find(
+        const primaryLine = runtimeLines.find(
           (line): line is ProgressLine =>
             isProgressLine(line) && line.label === primaryLabel
         )
@@ -75,4 +87,3 @@ export function getTrayPrimaryBars(args: {
 
   return out
 }
-

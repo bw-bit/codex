@@ -25,12 +25,14 @@ const THEME_MODE_KEY = "themeMode";
 const DISPLAY_MODE_KEY = "displayMode";
 const TRAY_ICON_STYLE_KEY = "trayIconStyle";
 const TRAY_SHOW_PERCENTAGE_KEY = "trayShowPercentage";
+const SHOW_CURSOR_PROVIDER_KEY = "showCursorProvider";
 
 export const DEFAULT_AUTO_UPDATE_INTERVAL: AutoUpdateIntervalMinutes = 15;
 export const DEFAULT_THEME_MODE: ThemeMode = "system";
 export const DEFAULT_DISPLAY_MODE: DisplayMode = "left";
 export const DEFAULT_TRAY_ICON_STYLE: TrayIconStyle = "bars";
 export const DEFAULT_TRAY_SHOW_PERCENTAGE = false;
+export const DEFAULT_SHOW_CURSOR_PROVIDER = false;
 
 const AUTO_UPDATE_INTERVALS: AutoUpdateIntervalMinutes[] = [5, 15, 30, 60];
 const THEME_MODES: ThemeMode[] = ["system", "light", "dark"];
@@ -67,7 +69,7 @@ export function isTrayPercentageMandatory(style: TrayIconStyle): boolean {
 
 const store = new LazyStore(SETTINGS_STORE_PATH);
 
-const DEFAULT_ENABLED_PLUGINS = new Set(["claude", "codex", "cursor"]);
+const DEFAULT_ENABLED_PLUGINS = new Set(["claude", "codex", "antigravity"]);
 
 export const DEFAULT_PLUGIN_SETTINGS: PluginSettings = {
   order: [],
@@ -211,6 +213,17 @@ export async function loadTrayShowPercentage(): Promise<boolean> {
 
 export async function saveTrayShowPercentage(value: boolean): Promise<void> {
   await store.set(TRAY_SHOW_PERCENTAGE_KEY, value);
+  await store.save();
+}
+
+export async function loadShowCursorProvider(): Promise<boolean> {
+  const stored = await store.get<unknown>(SHOW_CURSOR_PROVIDER_KEY);
+  if (typeof stored === "boolean") return stored;
+  return DEFAULT_SHOW_CURSOR_PROVIDER;
+}
+
+export async function saveShowCursorProvider(value: boolean): Promise<void> {
+  await store.set(SHOW_CURSOR_PROVIDER_KEY, value);
   await store.save();
 }
 

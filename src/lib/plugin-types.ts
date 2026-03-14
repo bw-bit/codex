@@ -28,7 +28,16 @@ export type PluginOutput = {
   displayName: string
   plan?: string
   lines: MetricLine[]
+  sections?: PluginSection[]
   iconUrl: string
+}
+
+export type PluginSection = {
+  id: string
+  label: string
+  plan?: string
+  subtitle?: string
+  lines: MetricLine[]
 }
 
 export type PluginMeta = {

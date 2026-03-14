@@ -5,6 +5,42 @@
   const REFRESH_URL = "https://auth.openai.com/oauth/token"
   const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
   const REFRESH_AGE_MS = 8 * 24 * 60 * 60 * 1000
+  const PROVIDERS_CONFIG = "providers.json"
+
+  function getProvidersConfigPath(ctx) {
+    return ctx.app.appDataDir + "/" + PROVIDERS_CONFIG
+  }
+
+  function normalizeAccount(raw, index) {
+    if (!raw || typeof raw !== "object") return null
+    var id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "account-" + (index + 1)
+    var label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : "Account " + (index + 1)
+    var authType = typeof raw.authType === "string" ? raw.authType : null
+    var authRef = typeof raw.authRef === "string" && raw.authRef.trim() ? raw.authRef.trim() : null
+    var meta = raw.meta && typeof raw.meta === "object" ? raw.meta : null
+    if (!authType) return null
+    return { id: id, label: label, authType: authType, authRef: authRef, meta: meta }
+  }
+
+  function loadAccounts(ctx) {
+    var path = getProvidersConfigPath(ctx)
+    if (!ctx.host.fs.exists(path)) return []
+    try {
+      var text = ctx.host.fs.readText(path)
+      var json = ctx.util.tryParseJson(text)
+      var accounts = json && json.providers && json.providers.codex && json.providers.codex.accounts
+      if (!Array.isArray(accounts)) return []
+      var out = []
+      for (var i = 0; i < accounts.length; i++) {
+        var normalized = normalizeAccount(accounts[i], i)
+        if (normalized) out.push(normalized)
+      }
+      return out
+    } catch (e) {
+      ctx.host.log.warn("providers config read failed: " + String(e))
+      return []
+    }
+  }
 
   function joinPath(base, leaf) {
     return base.replace(/[\\/]+$/, "") + "/" + leaf
@@ -61,10 +97,44 @@
       } else {
         ctx.host.log.warn("auth file exists but not valid JSON")
       }
-      return { auth, authPath }
+      return { auth, storage: { type: "file", path: authPath } }
     } catch (e) {
       ctx.host.log.warn("auth file read failed: " + String(e))
       return null
+    }
+  }
+
+  function loadAuthFromKeychain(ctx, service) {
+    try {
+      const value = ctx.host.keychain.readGenericPassword(service)
+      const auth = ctx.util.tryParseJson(value)
+      if (!auth) {
+        ctx.host.log.warn("keychain auth invalid JSON: " + service)
+        return null
+      }
+      return { auth, storage: { type: "keychain", service: service } }
+    } catch (e) {
+      ctx.host.log.warn("keychain read failed: " + String(e))
+      return null
+    }
+  }
+
+  function persistAuth(ctx, storage, auth) {
+    if (!storage) return
+    if (storage.type === "file" && storage.path) {
+      try {
+        ctx.host.fs.writeText(storage.path, JSON.stringify(auth, null, 2))
+      } catch (e) {
+        ctx.host.log.warn("auth persist failed: " + String(e))
+      }
+      return
+    }
+    if (storage.type === "keychain" && storage.service) {
+      try {
+        ctx.host.keychain.writeGenericPassword(storage.service, JSON.stringify(auth))
+      } catch (e) {
+        ctx.host.log.warn("keychain persist failed: " + String(e))
+      }
     }
   }
 
@@ -75,7 +145,7 @@
     return nowMs - lastMs > REFRESH_AGE_MS
   }
 
-  function refreshToken(ctx, auth, authPath) {
+  function refreshToken(ctx, auth, storage) {
     if (!auth.tokens || !auth.tokens.refresh_token) {
       ctx.host.log.warn("refresh skipped: no refresh token")
       return null
@@ -133,12 +203,7 @@
       if (body.id_token) auth.tokens.id_token = body.id_token
       auth.last_refresh = new Date().toISOString()
 
-      try {
-        ctx.host.fs.writeText(authPath, JSON.stringify(auth, null, 2))
-        ctx.host.log.info("refresh succeeded, auth file updated")
-      } catch (e) {
-        ctx.host.log.warn("refresh succeeded but failed to save auth: " + String(e))
-      }
+      persistAuth(ctx, storage, auth)
 
       return newAccessToken
     } catch (e) {
@@ -190,23 +255,40 @@
   var PERIOD_SESSION_MS = 5 * 60 * 60 * 1000    // 5 hours
   var PERIOD_WEEKLY_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
-  function probe(ctx) {
-    const authState = loadAuth(ctx)
+  function errorLine(ctx, message) {
+    return ctx.line.badge({ label: "Error", text: message })
+  }
+
+  function probeAccount(ctx, account) {
+    var authState = null
+    if (account && account.authType === "json") {
+      if (!account.authRef) {
+        throw "Missing keychain secret for account."
+      }
+      authState = loadAuthFromKeychain(ctx, account.authRef)
+      if (!authState || !authState.auth) {
+        throw "Keychain credentials missing."
+      }
+    } else if (account && account.authType && account.authType !== "auto") {
+      throw "Unsupported auth type for Codex."
+    } else {
+      authState = loadAuth(ctx)
+    }
     if (!authState || !authState.auth) {
       ctx.host.log.error("probe failed: not logged in")
       throw "Not logged in. Run `codex` to authenticate."
     }
     const auth = authState.auth
-    const authPath = authState.authPath
+    const storage = authState.storage
 
     if (auth.tokens && auth.tokens.access_token) {
       const nowMs = Date.now()
       let accessToken = auth.tokens.access_token
-      const accountId = auth.tokens.account_id
+      const accountId = (account && account.meta && account.meta.accountId) || auth.tokens.account_id
 
       if (needsRefresh(ctx, auth, nowMs)) {
         ctx.host.log.info("token needs refresh (age > " + (REFRESH_AGE_MS / 1000 / 60 / 60 / 24) + " days)")
-        const refreshed = refreshToken(ctx, auth, authPath)
+        const refreshed = refreshToken(ctx, auth, storage)
         if (refreshed) {
           accessToken = refreshed
         } else {
@@ -232,7 +314,7 @@
           refresh: () => {
             ctx.host.log.info("usage returned 401, attempting refresh")
             didRefresh = true
-            return refreshToken(ctx, auth, authPath)
+            return refreshToken(ctx, auth, storage)
           },
         })
       } catch (e) {
@@ -365,6 +447,36 @@
     }
 
     throw "Not logged in. Run `codex` to authenticate."
+  }
+
+  function probe(ctx) {
+    var accounts = loadAccounts(ctx)
+    if (!accounts || accounts.length === 0) {
+      return probeAccount(ctx, null)
+    }
+
+    var sections = []
+    for (var i = 0; i < accounts.length; i++) {
+      var account = accounts[i]
+      try {
+        var result = probeAccount(ctx, account)
+        sections.push({
+          id: account.id,
+          label: account.label,
+          plan: result.plan,
+          lines: result.lines,
+        })
+      } catch (e) {
+        var msg = typeof e === "string" ? e : "Probe failed"
+        sections.push({
+          id: account.id,
+          label: account.label,
+          lines: [errorLine(ctx, msg)],
+        })
+      }
+    }
+
+    return { lines: [], sections: sections }
   }
 
   globalThis.__openusage_plugin = { id: "codex", probe }

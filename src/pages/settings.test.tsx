@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import type { ReactNode } from "react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -57,6 +57,12 @@ const defaultProps = {
   onTrayIconStyleChange: vi.fn(),
   trayShowPercentage: false,
   onTrayShowPercentageChange: vi.fn(),
+  showCursorProvider: false,
+  onShowCursorProviderChange: vi.fn(),
+  providersConfig: { version: 1, providers: {} },
+  providers: [{ id: "codex", name: "Codex" }],
+  onUpsertAccount: vi.fn(async () => {}),
+  onRemoveAccount: vi.fn(async () => {}),
 }
 
 afterEach(() => {
@@ -64,7 +70,9 @@ afterEach(() => {
 })
 
 function getTrayShowPercentageCheckbox() {
-  return screen.getAllByRole("checkbox")[0]
+  const label = screen.getByText("Show percentage").closest("label")
+  if (!label) throw new Error("Show percentage label not found")
+  return within(label).getByRole("checkbox")
 }
 
 describe("SettingsPage", () => {

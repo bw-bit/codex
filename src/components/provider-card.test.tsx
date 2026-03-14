@@ -2,7 +2,8 @@ import { render, screen, within } from "@testing-library/react"
 import type { ReactNode } from "react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { ProviderCard, formatNumber } from "@/components/provider-card"
+import { ProviderCard } from "@/components/provider-card"
+import { formatNumber } from "@/components/metric-line"
 import { REFRESH_COOLDOWN_MS } from "@/lib/settings"
 
 vi.mock("@/components/ui/tooltip", () => ({

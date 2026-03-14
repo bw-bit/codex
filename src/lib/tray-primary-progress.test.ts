@@ -158,6 +158,50 @@ describe("getTrayPrimaryBars", () => {
     expect(bars).toEqual([{ id: "a", fraction: 0.75 }])
   })
 
+  it("uses section lines when present", () => {
+    const bars = getTrayPrimaryBars({
+      displayMode: "used",
+      pluginsMeta: [
+        {
+          id: "a",
+          name: "A",
+          iconUrl: "",
+          primaryCandidates: ["Session"],
+          lines: [],
+        },
+      ],
+      pluginSettings: { order: ["a"], disabled: [] },
+      pluginStates: {
+        a: {
+          data: {
+            providerId: "a",
+            displayName: "A",
+            iconUrl: "",
+            lines: [],
+            sections: [
+              {
+                id: "account-1",
+                label: "Account 1",
+                lines: [
+                  {
+                    type: "progress",
+                    label: "Session",
+                    used: 20,
+                    limit: 100,
+                    format: { kind: "percent" },
+                  },
+                ],
+              },
+            ],
+          },
+          loading: false,
+          error: null,
+        },
+      },
+    })
+    expect(bars).toEqual([{ id: "a", fraction: 0.2 }])
+  })
+
   it("picks first available candidate from primaryCandidates", () => {
     const bars = getTrayPrimaryBars({
       displayMode: "used",
@@ -258,4 +302,3 @@ describe("getTrayPrimaryBars", () => {
     expect(bars).toEqual([])
   })
 })
-

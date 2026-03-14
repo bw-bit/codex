@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "kimicode",
+  "name": "Kimi Code",
+  "version": "0.0.1",
+  "entry": "plugin.js",
+  "icon": "icon.svg",
+  "brandColor": "#111827",
+  "lines": [
+    { "type": "progress", "label": "Usage", "scope": "overview", "primaryOrder": 1 }
+  ]
+}
