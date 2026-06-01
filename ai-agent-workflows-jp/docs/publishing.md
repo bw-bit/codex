@@ -35,10 +35,23 @@ git push -u origin main
 
 ## Application Link
 
-After publishing, use:
+Standalone target after creating a dedicated repository:
 
 ```text
 https://github.com/bw-bit/ai-agent-workflows-jp
+```
+
+Current public project link:
+
+```text
+https://github.com/bw-bit/codex/tree/main/ai-agent-workflows-jp
+```
+
+Published commits:
+
+```text
+https://github.com/bw-bit/codex/commit/9608a07c6c68d3959616e865c25abca227287370
+https://github.com/bw-bit/codex/commit/d72f0e89b2bef68f1c50fbcdf05ae4d936a5528a
 ```
 
 ## Before Applying
